@@ -1,0 +1,18 @@
+services:
+  ingestion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./src:/app/src
+    command:
+      - python
+      - src/ingest_taxi_data.py
+      - --dataset
+      - taxi_zones
+      - --year
+      - "2024"
+      - --month
+      - "01"
