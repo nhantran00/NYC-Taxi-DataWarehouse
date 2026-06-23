@@ -1,2 +1,6 @@
 PyYAML==6.0.2
 requests==2.32.3
+pandas==2.1.4
+pyarrow==16.1.0
+SQLAlchemy==1.4.52
+psycopg2-binary==2.9.9

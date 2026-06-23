@@ -1,18 +1,124 @@
 services:
-  ingestion:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  postgres:
+    image: postgres:16
+    container_name: ${PROJECT_NAME:-nyc_taxi_datawarehouse}_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nyc_taxi}
+      POSTGRES_USER: ${POSTGRES_USER:-nyc_taxi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nyc_taxi}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - ./config:/app/config
-      - ./data:/app/data
-      - ./src:/app/src
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nyc_taxi} -d ${POSTGRES_DB:-nyc_taxi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  airflow-init:
+    image: apache/airflow:2.9.3-python3.12
+    container_name: ${PROJECT_NAME:-nyc_taxi_datawarehouse}_airflow_init
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-nyc_taxi}:${POSTGRES_PASSWORD:-nyc_taxi}@postgres:5432/${AIRFLOW_DB:-airflow}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      _PIP_ADDITIONAL_REQUIREMENTS: -r /opt/airflow/project/requirements.txt
+    user: "${AIRFLOW_UID:-50000}:0"
+    volumes:
+      - .:/opt/airflow/project
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    depends_on:
+      postgres:
+        condition: service_healthy
     command:
-      - python
-      - src/ingest_taxi_data.py
-      - --dataset
-      - taxi_zones
-      - --year
-      - "2024"
-      - --month
-      - "01"
+      - bash
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "$${AIRFLOW_ADMIN_USER}" \
+          --password "$${AIRFLOW_ADMIN_PASSWORD}" \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email "$${AIRFLOW_ADMIN_EMAIL}" || true
+
+  airflow-webserver:
+    image: apache/airflow:2.9.3-python3.12
+    container_name: ${PROJECT_NAME:-nyc_taxi_datawarehouse}_airflow_webserver
+    user: "${AIRFLOW_UID:-50000}:0"
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-nyc_taxi}:${POSTGRES_PASSWORD:-nyc_taxi}@postgres:5432/${AIRFLOW_DB:-airflow}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      _PIP_ADDITIONAL_REQUIREMENTS: -r /opt/airflow/project/requirements.txt
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/opt/airflow/project
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: webserver
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.3-python3.12
+    container_name: ${PROJECT_NAME:-nyc_taxi_datawarehouse}_airflow_scheduler
+    user: "${AIRFLOW_UID:-50000}:0"
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-nyc_taxi}:${POSTGRES_PASSWORD:-nyc_taxi}@postgres:5432/${AIRFLOW_DB:-airflow}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      _PIP_ADDITIONAL_REQUIREMENTS: -r /opt/airflow/project/requirements.txt
+    volumes:
+      - .:/opt/airflow/project
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: scheduler
+
+  metabase:
+    image: metabase/metabase:v0.50.13
+    container_name: ${PROJECT_NAME:-nyc_taxi_datawarehouse}_metabase
+    ports:
+      - "${METABASE_PORT:-3000}:3000"
+    volumes:
+      - metabase_data:/metabase-data
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  dbt:
+    image: ghcr.io/dbt-labs/dbt-postgres:1.8.2
+    container_name: ${PROJECT_NAME:-nyc_taxi_datawarehouse}_dbt
+    working_dir: /usr/app
+    volumes:
+      - ./dbt_project:/usr/app
+      - ./config:/root/.dbt
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["dbt"]
+    command: ["--version"]
+
+volumes:
+  postgres_data:
+  metabase_data:
